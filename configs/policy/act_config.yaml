@@ -31,6 +31,7 @@ training:
     batch_size: 32  # Batch size. Adjust as needed.
     num_workers: 8  # dataloader's num_workers. Adjust as needed per your computer's performance. Setting it too high might lock up your computer
     drop_last: False  # Whether to drop the last incomplete batch
+    exclude_episodes: []  # Episode indices to exclude from training
 
     # Max training step. Used to control the learning rate adjuster. If `max_training_step` is specified, it will take precedence
     # otherwise, this value will be automatically determined based on `max_epoch` mentioned above. ONLY one of the two will take effect!

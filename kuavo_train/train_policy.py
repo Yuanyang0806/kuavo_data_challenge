@@ -482,8 +482,26 @@ def main(cfg: DictConfig):
     delta_timestamps = build_delta_timestamps(dataset_metadata, policy_cfg)
 
     image_transforms = build_augmenter(cfg.training.RGB_Augmenter)
+
+    # Optionally exclude broken/invalid episodes while keeping the source dataset untouched.
+    exclude_episodes = {int(x) for x in getattr(cfg.training, "exclude_episodes", [])}
+    valid_episode_ids = set(range(dataset_metadata.total_episodes))
+    invalid_episode_ids = sorted(exclude_episodes - valid_episode_ids)
+    if invalid_episode_ids:
+        raise ValueError(f"Invalid exclude_episodes: {invalid_episode_ids}")
+
+    episodes = None
+    if exclude_episodes:
+        episodes = [
+            ep for ep in range(dataset_metadata.total_episodes)
+            if ep not in exclude_episodes
+        ]
+        print(f"Excluded episodes: {sorted(exclude_episodes)}")
+        print(f"Using episodes: {len(episodes)}/{dataset_metadata.total_episodes}")
+
     dataset = LeRobotDataset(
         cfg.repoid,
+        episodes=episodes,
         delta_timestamps=delta_timestamps,
         root=cfg.root,
         image_transforms=None,
@@ -548,6 +566,10 @@ def main(cfg: DictConfig):
 
             steps += 1
             total_loss += scaled_loss.item()
+
+            if cfg.training.max_training_step is not None and steps >= cfg.training.max_training_step:
+                print(f"Reached max_training_step={cfg.training.max_training_step}, stopping.")
+                break
         
         # Update best loss
         if total_loss < best_loss:
@@ -574,6 +596,9 @@ def main(cfg: DictConfig):
         }
         torch.save(checkpoint, output_directory / "learning_state.pth")
         save_rng_state(output_directory / "rng_state.pth")
+
+        if cfg.training.max_training_step is not None and steps >= cfg.training.max_training_step:
+            break
 
     writer.close()
 
