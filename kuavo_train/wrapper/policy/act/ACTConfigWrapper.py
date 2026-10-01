@@ -1,6 +1,7 @@
 from typing import Any, Dict
 from dataclasses import dataclass,fields,field
 import copy
+import lerobot_patches.custom_patches
 from lerobot.configs.policies import PreTrainedConfig
 from lerobot.policies.act.configuration_act import ACTConfig
 from lerobot.configs.types import FeatureType, NormalizationMode, PolicyFeature
