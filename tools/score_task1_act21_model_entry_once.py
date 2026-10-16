@@ -255,7 +255,7 @@ def main():
         model_cmd=("source /opt/ros/noetic/setup.bash && "
                    "source /root/kuavo_ws/devel/setup.bash && "
                    "export PYTHONUNBUFFERED=1 KUAVO_LOG_SERVER=0 KUAVO_LEG_SERVICE=0 && "
-                   "echo $ > "+shlex.quote(pid_file)+" && "
+                   'echo "${BASHPID}" > '+shlex.quote(pid_file)+" && "
                    "exec python3 -u /root/kuavo_ws/src/data_challenge_simulator/scripts/model_entry.py "
                    "--task-id 1 --seed 1 --headless --model-name "+shlex.quote(run_name))
         model,f=docker_command(OFFICIAL,model_cmd,model_log,display=display);logs.append(f)
@@ -290,12 +290,52 @@ def main():
             if msgs and msgs[-1]!=last:
                 last=msgs[-1];say(last)
         else:
-            say("[TIMEOUT] maximum 650s exceeded")
+            say("[TIMEOUT] diagnostic wall limit exceeded")
         say("[EXIT] model={} bridge={} client={}".format(model.poll(),bridge.poll(),client.poll()))
+    except Exception as exc:
+        run_error=exc
+        say("[RUN_EXCEPTION] {}: {}".format(type(exc).__name__,exc))
     finally:
-        cleanup(model,bridge,client)
-        for f in logs:f.close()
+        cleanup(model,bridge,client,pid_file,run_name)
+        for file in logs:
+            try:file.close()
+            except Exception:pass
         time.sleep(2)
+        telemetry=report/"act21_step_telemetry.jsonl"
+        copied=subprocess.run(["sudo","docker","cp",
+                               OFFICIAL+":"+telemetry_container,str(telemetry)],
+                              stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,
+                              timeout=25,check=False)
+        if copied.returncode==0 and telemetry.is_file():
+            try:
+                import statistics
+                series=[json.loads(line) for line in telemetry.read_text().splitlines()
+                        if line.strip()]
+                if series:
+                    track=[x["arm_target_tracking_mae_rad"] for x in series]
+                    cmd=[x["right_arm_target_rad"] for x in series]
+                    measured=[x["right_arm_measured_rad"] for x in series]
+                    moving=sum(sum(v*v for v in x["base_velocity_sent"])**0.5>0.03
+                               for x in series)
+                    summary={
+                        "frames":len(series),
+                        "recorded_elapsed_s":series[-1]["elapsed_s"],
+                        "base_command_moving_fraction":round(moving/len(series),5),
+                        "arm_tracking_mae_rad_mean":round(statistics.fmean(track),5),
+                        "arm_tracking_mae_rad_max":round(max(track),5),
+                        "arm_measured_start_end_change_mae_rad":round(
+                            sum(abs(measured[-1][i]-measured[0][i]) for i in range(7))/7,5),
+                        "arm_target_start_end_change_mae_rad":round(
+                            sum(abs(cmd[-1][i]-cmd[0][i]) for i in range(7))/7,5),
+                        "telemetry_file":str(telemetry),
+                    }
+                    (report/"trajectory_summary.json").write_text(
+                        json.dumps(summary,indent=2,ensure_ascii=False))
+                    say("[TRAJECTORY_SUMMARY]",json.dumps(summary,ensure_ascii=False))
+            except Exception as diagnostic_error:
+                say("[WARN] trajectory summary error: {}".format(diagnostic_error))
+        else:
+            say("[WARN] bridge telemetry was not created")
 
     for title,path in (("OFFICIAL",model_log),("BRIDGE",bridge_log),("CLIENT",client_log)):
         say("\n===== "+title+" LOG =====")
@@ -309,11 +349,14 @@ def main():
             say("\n[OFFICIAL_MODEL_SCORE]",json.dumps({
                 "score":obj["total"],"seed":1,"model":run_name,
                 "reason":run.get("finish_reason"),
+                "components":obj.get("components",{}),
                 "score_file":str(report/"official_score.json")
             },ensure_ascii=False))
             return
     say("\n[NO_VALID_SCORE] The official scorer has not finalized this run; do not invent score.")
     say("[REPORT]",report)
+    if run_error is not None:
+        raise run_error
     raise SystemExit(2)
 
 if __name__=="__main__":
