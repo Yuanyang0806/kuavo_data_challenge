@@ -21,6 +21,8 @@ assert torch.cuda.is_available(),"CUDA unavailable"
 print("[ACT] loading "+a.checkpoint,flush=True)
 model=ACTPolicy.from_pretrained(a.checkpoint,local_files_only=True,strict=True).to("cuda").eval()
 model.reset()
+print("[ACT_CONFIG] chunk_size={} n_action_steps={}".format(
+      model.config.chunk_size,model.config.n_action_steps),flush=True)
 pre,post=make_pre_post_processors(policy_cfg=model.config,pretrained_path=a.checkpoint)
 expected={"observation.state","observation.images.head_cam_h","observation.images.wrist_cam_r"}
 assert set(model.config.input_features)==expected,model.config.input_features
@@ -61,6 +63,8 @@ while True:
 sock.settimeout(35)
 print("[ACT_CONNECTED] host={} port={}".format(a.host,a.port),flush=True)
 count=0
+lat_sum=0.0
+lat_max=0.0
 while True:
     try:
         obs=receive(sock)
@@ -72,9 +76,13 @@ while True:
         "observation.images.head_cam_h":camera(obs["head"]),
         "observation.images.wrist_cam_r":camera(obs["right"]),
     }
+    tick=time.monotonic()
     with torch.inference_mode():
         predicted=model.select_action(pre(data))
         action=post(predicted)
+    dt=time.monotonic()-tick
+    lat_sum+=dt
+    lat_max=max(lat_max,dt)
     if not isinstance(action,torch.Tensor):
         action=torch.as_tensor(action)
     action=action.detach().float().cpu().reshape(-1)
@@ -83,6 +91,8 @@ while True:
     send(sock,action.tolist())
     count+=1
     if count==1 or count%25==0:
-        print("[ACT_ACTION] step={}".format(count),flush=True)
+        print("[ACT_ACTION] step={} inference_ms={:.1f} avg_ms={:.1f}".format(
+              count,dt*1000,lat_sum/count*1000),flush=True)
 sock.close()
-print("[ACT_DONE] steps={}".format(count),flush=True)
+print("[ACT_DONE] steps={} avg_inference_ms={:.1f} max_inference_ms={:.1f}".format(
+      count,lat_sum/max(1,count)*1000,lat_max*1000),flush=True)
