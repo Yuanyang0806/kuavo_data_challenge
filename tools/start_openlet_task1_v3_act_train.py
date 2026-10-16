@@ -80,7 +80,7 @@ import yaml,json,sys
 repo=Path(sys.argv[1]);data=Path(sys.argv[2]);out=Path(sys.argv[3]);ck=Path(sys.argv[4])
 original=yaml.safe_load((repo/"configs/train/lerobot/total/act_total.yaml").read_text())
 cfg=dict(original.pop("training"));cfg.update(original)
-cfg.update(output_dir=str(out),job_name=out.name,resume=False,steps=10000,
+cfg.update(output_dir=str(out)+"_model",job_name=out.name,resume=False,steps=10000,
            batch_size=4,num_workers=2,prefetch_factor=2,persistent_workers=False,
            save_checkpoint=True,save_freq=2000,log_freq=50,eval_freq=0,seed=20261016)
 cfg["dataset"].update(repo_id="OpenLET/task1_parts_pick_v3_500",root=str(data),
@@ -115,6 +115,7 @@ print("RUN:",run_id)
 print("DATA: 450 train / 50 held out")
 print("OLD CHECKPOINT: preserved")
 print("TRAIN LOG (host):",LOCAL_LET/"outputs/train"/run_id/"train.log")
+print("MODEL OUTPUT (host):",LOCAL_LET/"outputs/train"/(run_id+"_model"))
 time.sleep(12)
 check=dex("bash","-lc","tail -n 18 "+q(str(output/"train.log"))+
           "; if test -f "+q(str(output/"exit_status.txt"))+
