@@ -58,7 +58,9 @@ def evaluate_one(batch,model,pre,post,name):
         pred=post(pred_norm)
     if not isinstance(pred,torch.Tensor):
         pred=torch.as_tensor(pred,device="cuda")
-    pred=pred.float()
+    # Postprocessor may return CPU tensors even if policy predicts on CUDA.
+    # Align both tensors before measuring action error in raw action units.
+    pred=pred.to(device=raw_action.device, dtype=torch.float32)
     require(pred.shape==raw_action.shape, f"{name} output shape {pred.shape}, target {raw_action.shape}")
     errors=(pred-raw_action).abs().mean(dim=1)
     require(bool(torch.isfinite(errors).all()),f"{name}: nonfinite MAE")
