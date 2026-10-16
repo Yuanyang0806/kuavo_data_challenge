@@ -2,7 +2,7 @@
 """Temporary 21D right-arm SG100+base adapter for official OpenLET model_entry."""
 import argparse, json, math, pickle, socket, struct, threading, time
 import rospy
-from geometry_msgs.msg import Twist
+from geometry_msgs.msg import Twist, PoseStamped
 from sensor_msgs.msg import CompressedImage, JointState
 from std_msgs.msg import Bool
 from std_srvs.srv import Trigger
@@ -20,6 +20,7 @@ lock=threading.Lock()
 obs={k:None for k in ("head","right","sensor","hand")}
 t_seen={k:0.0 for k in obs}
 success=False
+base_pose=None
 
 def update(key,obj):
     with lock:
@@ -28,11 +29,16 @@ def update(key,obj):
 def success_cb(m):
     global success
     if m.data:success=True
+def base_cb(m):
+    global base_pose
+    with lock:
+        base_pose=(float(m.pose.position.x),float(m.pose.position.y),float(m.pose.position.z))
 rospy.Subscriber("/cam_h/color/image_raw/compressed",CompressedImage,lambda m:update("head",bytes(m.data)),queue_size=1)
 rospy.Subscriber("/cam_r/color/image_raw/compressed",CompressedImage,lambda m:update("right",bytes(m.data)),queue_size=1)
 rospy.Subscriber("/sensors_data_raw",sensorsData,lambda m:update("sensor",m),queue_size=1)
 rospy.Subscriber("/sg100_hand_state",SG100HandState,lambda m:update("hand",m),queue_size=1)
 rospy.Subscriber("/simulator/success",Bool,success_cb,queue_size=1)
+rospy.Subscriber("/mujoco/base_link/pose",PoseStamped,base_cb,queue_size=1)
 arms=rospy.Publisher("/kuavo_arm_traj",JointState,queue_size=1)
 hands=rospy.Publisher("/sg100_hand_command",SG100HandCommand,queue_size=1)
 base=rospy.Publisher("/cmd_vel",Twist,queue_size=1)
@@ -143,8 +149,11 @@ try:
         target_delta=(sum(abs(float(action[i])-previous_action[i]) for i in range(7))/7.0
                       if previous_action is not None else None)
         previous_action=[float(x) for x in action]
+        with lock:
+            xyz=base_pose
         entry={
             "step":count,
+            "base_position_xyz_m":xyz,
             "elapsed_s":round(time.monotonic()-t0,3),
             "right_arm_measured_rad":right_q,
             "right_arm_target_rad":[float(x) for x in action[:7]],
