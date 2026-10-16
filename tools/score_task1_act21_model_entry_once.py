@@ -45,11 +45,79 @@ def tail(path,n=15):
     if not path.is_file():return "<log not created>"
     content=path.read_text(errors="replace").replace("\r","\n")
     return "\n".join(content.splitlines()[-n:])
-def docker_command(container,command,logfile):
+def docker_command(container,command,logfile,display=None):
     file=open(logfile,"w",buffering=1)
-    proc=subprocess.Popen(["sudo","docker","exec",container,"bash","-lc",command],
-                          stdout=file,stderr=subprocess.STDOUT)
+    cmd=["sudo","docker","exec"]
+    if container==OFFICIAL:
+        # scene1.sh passes these even for task-headless; MuJoCo's GlfwAdapter
+        # still requires a functioning X/GLFW context.
+        cmd += ["-e","ROBOT_VERSION=400062"]
+        if display is not None:
+            cmd += ["-e","DISPLAY="+display]
+    cmd += [container,"bash","-lc",command]
+    proc=subprocess.Popen(cmd,stdout=file,stderr=subprocess.STDOUT)
     return proc,file
+
+def find_working_display():
+    # The MuJoCo C++ build creates a GLFW window even with MUJOCO_HEADLESS=1.
+    # Test in the *same container* before starting ROS, to avoid 60s topic
+    # waits and repeated auto-retries when DISPLAY was omitted.
+    test_code = """
+import ctypes, ctypes.util, os, sys
+name = ctypes.util.find_library("glfw")
+if not name:
+    # If libglfw is statically linked, XOpenDisplay at least proves that
+    # DISPLAY and X11 authentication are usable.
+    lib = ctypes.CDLL("libX11.so.6")
+    lib.XOpenDisplay.argtypes = [ctypes.c_char_p]
+    lib.XOpenDisplay.restype = ctypes.c_void_p
+    ptr = lib.XOpenDisplay(None)
+    if ptr:
+        lib.XCloseDisplay.argtypes = [ctypes.c_void_p]
+        lib.XCloseDisplay(ptr)
+        sys.exit(0)
+    sys.exit(2)
+glfw = ctypes.CDLL(name)
+glfw.glfwInit.restype = ctypes.c_int
+if glfw.glfwInit() != 1:
+    sys.exit(3)
+try:
+    glfw.glfwWindowHint.argtypes = [ctypes.c_int, ctypes.c_int]
+    glfw.glfwWindowHint(0x00020004, 0)  # GLFW_VISIBLE=false
+    glfw.glfwCreateWindow.argtypes = [ctypes.c_int,ctypes.c_int,ctypes.c_char_p,
+                                      ctypes.c_void_p,ctypes.c_void_p]
+    glfw.glfwCreateWindow.restype = ctypes.c_void_p
+    window = glfw.glfwCreateWindow(64,64,b"openlet-preflight",None,None)
+    if not window:
+        sys.exit(4)
+    glfw.glfwDestroyWindow.argtypes = [ctypes.c_void_p]
+    glfw.glfwDestroyWindow(window)
+finally:
+    glfw.glfwTerminate()
+"""
+    candidates = []
+    # Prefer the exact host DISPLAY; fallback to well-known local X displays.
+    for disp in (os.environ.get("DISPLAY"),":0",":1"):
+        if disp and disp not in candidates:
+            candidates.append(disp)
+    # Also test the container's existing DISPLAY, if configured.
+    env = sudo_docker("exec",OFFICIAL,"bash","-lc",'printf "%s" "$DISPLAY"',
+                     capture=True).stdout.strip()
+    if env and env not in candidates:
+        candidates.append(env)
+    for display in candidates:
+        proc=subprocess.run(["sudo","docker","exec","-e","DISPLAY="+display,
+                             OFFICIAL,"python3","-c",test_code],
+                            capture_output=True,text=True,timeout=20,check=False)
+        if proc.returncode==0:
+            say("[PASS] container GLFW can initialize with DISPLAY="+display)
+            return display
+        say("[DISPLAY_CHECK] {} failed (exit={}); {}".format(
+            display,proc.returncode,(proc.stderr or "").strip()[-200:]))
+    die("MuJoCo requires X/GLFW even in headless mode. None of the DISPLAY "
+        "candidates worked inside the official container. Check that the "
+        "host X server is running and the container can access its socket "
+        "and authentication; no simulator has been launched.")
 def signal_model():
     subprocess.run(["sudo","docker","exec",OFFICIAL,"bash","-lc",
                     "pkill -INT -f '[m]odel_entry.py' || true"],
@@ -107,6 +175,7 @@ def main():
             "pgrep -af" not in x and "bash -lc" not in x]
     if active:
         die("simulator already busy, refusing to interrupt:\n"+"\n".join(active[:10]))
+    display=find_working_display()
     if train["HostConfig"]["NetworkMode"]=="host":
         host="127.0.0.1";bind="127.0.0.1"
     else:
@@ -146,12 +215,12 @@ def main():
     try:
         say("[START] official model_entry Task1 seed=1, headless")
         model_cmd="source /opt/ros/noetic/setup.bash && source /root/kuavo_ws/devel/setup.bash && export PYTHONUNBUFFERED=1 KUAVO_LOG_SERVER=0 KUAVO_LEG_SERVICE=0 && exec python3 -u /root/kuavo_ws/src/data_challenge_simulator/scripts/model_entry.py --task-id 1 --seed 1 --headless --model-name "+shlex.quote(run_name)
-        model,f=docker_command(OFFICIAL,model_cmd,model_log);logs.append(f)
+        model,f=docker_command(OFFICIAL,model_cmd,model_log,display=display);logs.append(f)
         time.sleep(7)
         if model.poll() is not None:die("model_entry exited during startup:\n"+tail(model_log))
         say("[START] temporary ROS bridge")
         bridge_cmd="source /opt/ros/noetic/setup.bash && source /root/kuavo_ws/devel/setup.bash && exec python3 -u /tmp/task1_act21_ros_bridge.py --bind {} --port {} --steps 200".format(shlex.quote(bind),port)
-        bridge,f=docker_command(OFFICIAL,bridge_cmd,bridge_log);logs.append(f)
+        bridge,f=docker_command(OFFICIAL,bridge_cmd,bridge_log,display=display);logs.append(f)
         time.sleep(3)
         if bridge.poll() is not None:die("bridge exited during startup:\n"+tail(bridge_log))
         say("[START] LeTools new ACT GPU inference")
@@ -161,6 +230,11 @@ def main():
         last=""
         while time.monotonic()<deadline:
             time.sleep(5)
+            # model_entry automatically retries another random seed when
+            # initial topic checks fail; abort instead of running a wrong seed.
+            if "[ERROR] model entry: task 1 seed 1 failed before teardown" in model_log.read_text(errors="replace"):
+                say("[STARTUP_ABORT] official seed 1 did not initialize; no score")
+                break
             if bridge.poll() is not None or client.poll() is not None or model.poll() is not None:
                 break
             msgs=[line for line in tail(bridge_log,30).splitlines()
