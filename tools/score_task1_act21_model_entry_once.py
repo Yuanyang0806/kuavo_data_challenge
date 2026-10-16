@@ -113,7 +113,7 @@ def main():
         gateways=[n.get("Gateway") for n in train["NetworkSettings"]["Networks"].values()]
         gateways=[g for g in gateways if g and ":" not in g]
         if not gateways:die("training container has no reachable host IPv4 gateway")
-        host=gateways[0];bind="0.0.0.0"
+        host=gateways[0];bind=host  # listen only on Docker gateway, not every host interface
     with socket.socket() as probe:
         probe.bind(("0.0.0.0",0))
         port=probe.getsockname()[1]
