@@ -20,7 +20,7 @@ import tempfile
 import time
 from pathlib import Path
 
-SCRIPT_REV="847aedef5d6c4c26e8a7e4a73c2cbd4403e20439"
+SCRIPT_REV="14a20090d75d0d795132efc476ca72089d0a2e96"
 BASE_RAW="https://raw.githubusercontent.com/Yuanyang0806/kuavo_data_challenge/"+SCRIPT_REV+"/tools/"
 OFFICIAL="kuavo-openlet-official-20261011"
 TRAIN="letools-pi05"
@@ -317,10 +317,25 @@ def main():
                     measured=[x["right_arm_measured_rad"] for x in series]
                     moving=sum(sum(v*v for v in x["base_velocity_sent"])**0.5>0.03
                                for x in series)
+                    base_positions=[x["base_position_xyz_m"] for x in series
+                                    if x.get("base_position_xyz_m") is not None]
+                    base_displacement=None
+                    base_path=None
+                    if len(base_positions)>=2:
+                        import math
+                        base_displacement=round(math.hypot(
+                            base_positions[-1][0]-base_positions[0][0],
+                            base_positions[-1][1]-base_positions[0][1]),5)
+                        base_path=round(sum(math.hypot(
+                            base_positions[i][0]-base_positions[i-1][0],
+                            base_positions[i][1]-base_positions[i-1][1])
+                            for i in range(1,len(base_positions))),5)
                     summary={
                         "frames":len(series),
                         "recorded_elapsed_s":series[-1]["elapsed_s"],
                         "base_command_moving_fraction":round(moving/len(series),5),
+                        "base_measured_displacement_m":base_displacement,
+                        "base_measured_path_length_m":base_path,
                         "arm_tracking_mae_rad_mean":round(statistics.fmean(track),5),
                         "arm_tracking_mae_rad_max":round(max(track),5),
                         "arm_measured_start_end_change_mae_rad":round(
