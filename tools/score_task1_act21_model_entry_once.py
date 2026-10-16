@@ -119,21 +119,33 @@ finally:
         "candidates worked inside the official container. Check that the "
         "host X server is running and the container can access its socket "
         "and authentication; no simulator has been launched.")
-def signal_model():
-    subprocess.run(["sudo","docker","exec",OFFICIAL,"bash","-lc",
-                    "pkill -INT -f '[m]odel_entry.py' || true"],
-                   stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,timeout=12,check=False)
-def cleanup(model,bridge,client):
+def signal_model(pid_file,tag):
+    # Do not match or signal other model_entry processes by name.
+    shell = """pidfile=$1; tag=$2
+test -r "$pidfile" || exit 4
+pid=$(cat "$pidfile")
+case "$pid" in ""|*[!0-9]*) exit 5;; esac
+test -r "/proc/$pid/cmdline" || exit 0
+args=$(tr '\\000' ' ' < "/proc/$pid/cmdline")
+case "$args" in *"/scripts/model_entry.py"*) ;; *) exit 6;; esac
+case "$args" in *"$tag"*) ;; *) exit 7;; esac
+kill -TERM "$pid"
+"""
+    result=subprocess.run(["sudo","docker","exec",OFFICIAL,"bash","-lc",
+                           shell,"bash",pid_file,tag],
+                          capture_output=True,text=True,timeout=12,check=False)
+    if result.returncode!=0:
+        say("[WARN] exact-PID model stop returned rc={} stderr={}".format(
+             result.returncode,(result.stderr or "").strip()[-200:]))
+def cleanup(model,bridge,client,pid_file,tag):
     for proc in (bridge,client):
         if proc is not None and proc.poll() is None:
             proc.terminate()
     if model is not None and model.poll() is None:
-        signal_model()
-        try:model.wait(timeout=28)
+        signal_model(pid_file,tag)
+        try:model.wait(timeout=35)
         except subprocess.TimeoutExpired:
-            subprocess.run(["sudo","docker","exec",OFFICIAL,"bash","-lc",
-                            "pkill -TERM -f '[m]odel_entry.py' || true"],
-                           stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,timeout=12,check=False)
+            say("[WARN] model entry still running 35s after graceful SIGTERM")
     for proc in (model,bridge,client):
         if proc is not None and proc.poll() is None:
             proc.terminate()
