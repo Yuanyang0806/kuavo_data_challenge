@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Temporary 21D right-arm SG100+base adapter for official OpenLET model_entry."""
-import argparse, math, pickle, socket, struct, threading, time
+import argparse, json, math, pickle, socket, struct, threading, time
 import rospy
 from geometry_msgs.msg import Twist
 from sensor_msgs.msg import CompressedImage, JointState
@@ -11,7 +11,9 @@ from kuavo_msgs.msg import sensorsData, SG100HandState, SG100HandCommand
 p=argparse.ArgumentParser()
 p.add_argument("--port",type=int,required=True)
 p.add_argument("--bind",default="127.0.0.1")
-p.add_argument("--steps",type=int,default=200)
+p.add_argument("--steps",type=int,default=1200)
+p.add_argument("--max-wall-seconds",type=float,default=180.0)
+p.add_argument("--telemetry",required=True)
 args=p.parse_args()
 rospy.init_node("openlet_task1_act21_bridge",anonymous=True)
 lock=threading.Lock()
@@ -84,9 +86,16 @@ if not started.success:
     raise RuntimeError("official /simulator/start rejected: "+started.message)
 print("[OFFICIAL_SCORING_STARTED]",started.message,flush=True)
 count=0
+t0=time.monotonic()
+logs=open(args.telemetry,"w",buffering=1)
+terminal_reason="max_steps"
+previous_action=None
 try:
     rate=rospy.Rate(10)
     while not rospy.is_shutdown() and not success and count<args.steps:
+        if time.monotonic()-t0>args.max_wall_seconds:
+            terminal_reason="wall_time_limit"
+            break
         o=get_observation()
         if o is None:raise RuntimeError("stale observation")
         q=list(o["sensor"].joint_data.joint_q)
@@ -127,12 +136,37 @@ try:
         v.angular.z=max(-0.35,min(0.35,float(action[20])))
         base.publish(v)
         count+=1
-        if count==1 or count%25==0:
-            print("[ACTION] step={} vx={:.3f} vy={:.3f} wz={:.3f}".format(
-                count,v.linear.x,v.linear.y,v.angular.z),flush=True)
+        actual_hand=[float(x)/1.57 for x in right[:11]]
+        target_hand=[float(x) for x in action[7:18]]
+        arm_error=sum(abs(float(action[i])-right_q[i]) for i in range(7))/7.0
+        hand_error=sum(abs(target_hand[i]-actual_hand[i]) for i in range(11))/11.0
+        target_delta=(sum(abs(float(action[i])-previous_action[i]) for i in range(7))/7.0
+                      if previous_action is not None else None)
+        previous_action=[float(x) for x in action]
+        entry={
+            "step":count,
+            "elapsed_s":round(time.monotonic()-t0,3),
+            "right_arm_measured_rad":right_q,
+            "right_arm_target_rad":[float(x) for x in action[:7]],
+            "right_sg100_measured_normalized":actual_hand,
+            "right_sg100_target_normalized":target_hand,
+            "base_velocity_raw":[float(x) for x in action[18:21]],
+            "base_velocity_sent":[v.linear.x,v.linear.y,v.angular.z],
+            "arm_target_tracking_mae_rad":round(arm_error,6),
+            "hand_target_tracking_mae_normalized":round(hand_error,6),
+            "arm_target_step_delta_rad":round(target_delta,6) if target_delta is not None else None
+        }
+        logs.write(json.dumps(entry,separators=(",",":"))+"\n")
+        if count==1 or count%50==0:
+            print("[ACTION] step={} elapsed={:.1f}s arm_track={:.4f} hand_track={:.4f} vx={:.3f} vy={:.3f} wz={:.3f}".format(
+                count,entry["elapsed_s"],arm_error,hand_error,v.linear.x,v.linear.y,v.angular.z),flush=True)
         rate.sleep()
+    if success:
+        terminal_reason="success"
 finally:
     base.publish(Twist())
+    logs.close()
     conn.close()
     srv.close()
-    print("[BRIDGE_DONE] steps={} success={}".format(count,success),flush=True)
+    print("[BRIDGE_DONE] steps={} wall_s={:.1f} success={} reason={} telemetry={}".format(
+          count,time.monotonic()-t0,success,terminal_reason,args.telemetry),flush=True)
