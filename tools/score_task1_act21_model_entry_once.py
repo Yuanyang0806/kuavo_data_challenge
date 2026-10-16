@@ -7,6 +7,7 @@ Always stops the processes it started; preserves earlier model score files in re
 """
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import re
@@ -19,7 +20,7 @@ import tempfile
 import time
 from pathlib import Path
 
-SCRIPT_REV="b8e4e616602be28023250e1efed57d6613482565"
+SCRIPT_REV="847aedef5d6c4c26e8a7e4a73c2cbd4403e20439"
 BASE_RAW="https://raw.githubusercontent.com/Yuanyang0806/kuavo_data_challenge/"+SCRIPT_REV+"/tools/"
 OFFICIAL="kuavo-openlet-official-20261011"
 TRAIN="letools-pi05"
@@ -140,11 +141,21 @@ def cleanup(model,bridge,client):
             except subprocess.TimeoutExpired:proc.kill()
 
 def main():
+    parser=argparse.ArgumentParser(description="Task1 ACT21 extended diagnostic")
+    parser.add_argument("--steps",type=int,default=1200)
+    parser.add_argument("--max-wall-seconds",type=float,default=180.0)
+    args=parser.parse_args()
+    if not 200<=args.steps<=2000:
+        die("--steps must be in [200,2000]")
+    if not 30<=args.max_wall_seconds<=300:
+        die("--max-wall-seconds must be in [30,300]")
     stamp=time.strftime("%Y%m%d_%H%M%S")
     run_name="ACTV3_"+stamp
     report=Path.home()/"openlet-test-reports"/("act21_official_seed1_"+stamp)
     report.mkdir(parents=True,exist_ok=False)
     say("[REPORT]",report)
+    say("[EVAL_WINDOW] steps={} max_wall_s={:.0f}".format(args.steps,args.max_wall_seconds))
+    say("[NOTE] Extended diagnostic; official LeTools deployment default is 200 steps.")
     if not (CK_HOST/"model.safetensors").is_file():
         die("new 10k ACT weights missing")
     if not DATA_META.is_file():
@@ -158,6 +169,18 @@ def main():
         die("action_names not right arm7+SG100x11+base3, refuse unsafe commands")
     if state_names != right_arm+right_hand:
         die("state_names not right arm7+SG100x11")
+    task_meta=DATA_META.parent/"tasks.jsonl"
+    tasks=[]
+    if task_meta.is_file():
+        with task_meta.open() as stream:
+            for i,line in enumerate(stream):
+                if i>=30:break
+                try:tasks.append(json.loads(line))
+                except json.JSONDecodeError:tasks.append({"unparsed":line[:160]})
+    (report/"dataset_tasks_preview.json").write_text(json.dumps(
+        {"dataset":str(DATA_META.parent.parent),"sample":tasks},
+        indent=2,ensure_ascii=False))
+    say("[TASK_META] stored {} task descriptions (if present)".format(len(tasks)))
     official=inspect(OFFICIAL);train=inspect(TRAIN)
     for item,name in ((official,OFFICIAL),(train,TRAIN)):
         if not item["State"]["Running"]:die(name+" not running")
@@ -212,21 +235,34 @@ def main():
     client_log=report/"act21_gpu.log"
     model=bridge=client=None
     logs=[]
+    telemetry_container="/tmp/openlet_task1_act21_{}_telemetry.jsonl".format(stamp)
+    pid_file="/tmp/openlet_model_entry_{}.pid".format(stamp)
+    run_error=None
     try:
         say("[START] official model_entry Task1 seed=1, headless")
-        model_cmd="source /opt/ros/noetic/setup.bash && source /root/kuavo_ws/devel/setup.bash && export PYTHONUNBUFFERED=1 KUAVO_LOG_SERVER=0 KUAVO_LEG_SERVICE=0 && exec python3 -u /root/kuavo_ws/src/data_challenge_simulator/scripts/model_entry.py --task-id 1 --seed 1 --headless --model-name "+shlex.quote(run_name)
+        model_cmd=("source /opt/ros/noetic/setup.bash && "
+                   "source /root/kuavo_ws/devel/setup.bash && "
+                   "export PYTHONUNBUFFERED=1 KUAVO_LOG_SERVER=0 KUAVO_LEG_SERVICE=0 && "
+                   "echo $ > "+shlex.quote(pid_file)+" && "
+                   "exec python3 -u /root/kuavo_ws/src/data_challenge_simulator/scripts/model_entry.py "
+                   "--task-id 1 --seed 1 --headless --model-name "+shlex.quote(run_name))
         model,f=docker_command(OFFICIAL,model_cmd,model_log,display=display);logs.append(f)
         time.sleep(7)
         if model.poll() is not None:die("model_entry exited during startup:\n"+tail(model_log))
         say("[START] temporary ROS bridge")
-        bridge_cmd="source /opt/ros/noetic/setup.bash && source /root/kuavo_ws/devel/setup.bash && exec python3 -u /tmp/task1_act21_ros_bridge.py --bind {} --port {} --steps 200".format(shlex.quote(bind),port)
+        bridge_cmd=("source /opt/ros/noetic/setup.bash && "
+                    "source /root/kuavo_ws/devel/setup.bash && "
+                    "exec python3 -u /tmp/task1_act21_ros_bridge.py "
+                    "--bind {} --port {} --steps {} --max-wall-seconds {:.1f} --telemetry {}".format(
+                        shlex.quote(bind),port,args.steps,args.max_wall_seconds,
+                        shlex.quote(telemetry_container)))
         bridge,f=docker_command(OFFICIAL,bridge_cmd,bridge_log,display=display);logs.append(f)
         time.sleep(3)
         if bridge.poll() is not None:die("bridge exited during startup:\n"+tail(bridge_log))
         say("[START] LeTools new ACT GPU inference")
         client_cmd="export PYTHONPATH=/workspace/openlet/code/LeTools-Learning/third_party/lerobot/src:/workspace/openlet/code/LeTools-Learning:$PYTHONPATH; export PYTHONUNBUFFERED=1; exec python3 -u /tmp/task1_act21_gpu_client.py --host {} --port {} --checkpoint {}".format(shlex.quote(host),port,shlex.quote(CK_DOCKER))
         client,f=docker_command(TRAIN,client_cmd,client_log);logs.append(f)
-        deadline=time.monotonic()+650
+        deadline=time.monotonic()+args.max_wall_seconds+400
         last=""
         while time.monotonic()<deadline:
             time.sleep(5)
