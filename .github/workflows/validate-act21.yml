@@ -7,6 +7,7 @@ on:
       - "tools/task1_act21_ros_bridge.py"
       - "tools/task1_act21_gpu_client.py"
       - "tools/score_task1_act21_model_entry_once.py"
+      - "tools/diagnose_task1_act_online_domain_gap.py"
       - ".github/workflows/validate-act21.yml"
   workflow_dispatch:
 jobs:
@@ -19,5 +20,5 @@ jobs:
           python-version: "3.11"
       - name: Check syntax
         run: |
-          python -m py_compile tools/task1_act21_ros_bridge.py tools/task1_act21_gpu_client.py tools/score_task1_act21_model_entry_once.py
+          python -m py_compile tools/task1_act21_ros_bridge.py tools/task1_act21_gpu_client.py tools/score_task1_act21_model_entry_once.py tools/diagnose_task1_act_online_domain_gap.py
           python tools/score_task1_act21_model_entry_once.py --help
